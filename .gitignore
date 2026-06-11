@@ -1,0 +1,11 @@
+# Local tooling (Serena / WebStorm)
+.serena/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor / temp
+*~
+*.swp
+*.swo
