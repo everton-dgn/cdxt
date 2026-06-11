@@ -318,7 +318,7 @@ status_cell() {
       REPLY=$' \033[1;32m● ON \033[0m'
       ;;
     false)
-      REPLY=$' \033[2m○ OFF\033[0m'
+      REPLY=$' \033[38;2;98;114;164m○ OFF\033[0m'
       ;;
     *)
       REPLY=$' \033[33m? ???\033[0m'
@@ -329,13 +329,13 @@ status_cell() {
 kind_cell() {
   case "$1" in
     mcp)
-      REPLY=$'\033[36mmcp   \033[0m'
+      REPLY=$'   \033[36mmcp   \033[0m   '
       ;;
     plugin)
-      REPLY=$'\033[35mplugin\033[0m'
+      REPLY=$'   \033[35mplugin\033[0m   '
       ;;
     *)
-      REPLY="$1"
+      REPLY="   $1   "
       ;;
   esac
 }
@@ -573,7 +573,6 @@ fzf_menu() {
     --id-nth=1 \
     --gap=1 \
     --gap-line='' \
-    --scrollbar='┃' \
     --layout=reverse \
     --height='~80%' \
     --style=full:rounded \
