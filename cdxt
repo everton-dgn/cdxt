@@ -3,6 +3,10 @@
 # Codex CLI config (~/.codex/config.toml).
 # https://github.com/everton-dgn/cdxt
 set -u
+# Defensive: disable MULTIOS so a redirection combined with a pipe on the
+# same fd can never duplicate a stream (zsh default behavior). Nothing in
+# the script currently relies on either semantics.
+setopt no_multios
 
 CONFIG="${CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 BACKUP_DIR="${CODEX_CONFIG_BACKUP_DIR:-${CODEX_HOME:-$HOME/.codex}/config.toml.backups}"
@@ -11,14 +15,26 @@ SCRIPT_PATH="${0:A}"
 
 # fzf 0.71+ is required for --id-nth (cursor tracking across reloads).
 FZF_MIN_VERSION="0.71"
+FZF_HEADER='→ enable • ← disable • space toggle • enter/esc quit'
+
+VERSION="0.1.0"
 
 typeset -a REGISTRY
 typeset -A ENABLED_MAP
 typeset -i WROTE=0
+ERR_MSG=""
 
 die() {
   print -u2 -- "$1"
   exit 1
+}
+
+# Record an error and print it to stderr. The transform-* branches read
+# ERR_MSG afterwards: they cannot capture stderr in a subshell without
+# losing the WROTE flag set by do_toggle_index/do_set_index.
+fail() {
+  ERR_MSG="$1"
+  print -u2 -- "$1"
 }
 
 discard_file() {
@@ -28,15 +44,24 @@ discard_file() {
 }
 
 prune_backups() {
-  local -a backups
+  local -a backups tmps
+  local have_trash=0
+
+  command -v trash >/dev/null 2>&1 && have_trash=1
+  (( have_trash )) || return 0
 
   backups=("$BACKUP_DIR"/config.toml.*(N.om))
+  if (( ${#backups[@]} > BACKUP_KEEP )); then
+    trash "${backups[@]:$BACKUP_KEEP}" 2>/dev/null
+  fi
 
-  (( ${#backups[@]} > BACKUP_KEEP )) || return 0
-
-  command -v trash >/dev/null 2>&1 || return 0
-
-  trash "${backups[@]:$BACKUP_KEEP}" 2>/dev/null
+  # Sweep orphan tmp files (they only persist after failed writes). Only
+  # files older than one hour: a fresh tmp may belong to a concurrent cdxt
+  # mid-write. Separate pool so the BACKUP_KEEP count is not distorted.
+  tmps=("$BACKUP_DIR"/.tmp.config.toml.*(N.mh+1))
+  if (( ${#tmps[@]} > 0 )); then
+    trash "${tmps[@]}" 2>/dev/null
+  fi
 }
 
 load_registry() {
@@ -190,10 +215,37 @@ load_enabled_map() {
   ' "$CONFIG")
 }
 
+# True (exit 0) if the section already contains an `enabled = ...` line.
+# write_enabled_value must know this up front: its awk pass is single-pass
+# and would otherwise insert a duplicate key above an existing one.
+section_has_enabled() {
+  local section="$1"
+
+  awk -v target="[$section]" '
+    $0 == target {
+      in_target = 1
+      next
+    }
+
+    in_target && $0 ~ /^\[/ {
+      exit
+    }
+
+    in_target && $0 ~ /^[[:space:]]*enabled[[:space:]]*=/ {
+      found = 1
+      exit
+    }
+
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$CONFIG"
+}
+
 write_enabled_value() {
   local section="$1"
   local value="$2"
-  local timestamp backup tmp
+  local timestamp backup tmp has_enabled
 
   mkdir -p "$BACKUP_DIR" || return 1
 
@@ -204,7 +256,10 @@ write_enabled_value() {
   cp "$CONFIG" "$backup" || return 1
   cp -p "$CONFIG" "$tmp" || return 1
 
-  awk -v target="[$section]" -v desired="$value" '
+  has_enabled=0
+  section_has_enabled "$section" && has_enabled=1
+
+  awk -v target="[$section]" -v desired="$value" -v has_enabled="$has_enabled" '
     $0 == target {
       in_target = 1
       inserted = 0
@@ -230,6 +285,16 @@ write_enabled_value() {
       next
     }
 
+    in_target && !has_enabled && !inserted && $0 !~ /^[[:space:]]*#/ && NF > 0 {
+      # No enabled key anywhere in this section: insert at the first
+      # non-blank, non-comment line so it sits right below the header.
+      print "enabled = " desired
+      print
+      inserted = 1
+      in_target = 0
+      next
+    }
+
     {
       print
     }
@@ -251,7 +316,12 @@ write_enabled_value() {
 
   prune_backups
 
-  print -- "Backup: $backup"
+  # With CODEX_CONFIG_BACKUP_KEEP=0 the backup is pruned immediately.
+  if [[ -f "$backup" ]]; then
+    print -- "Backup: $backup"
+  fi
+
+  return 0
 }
 
 status_label() {
@@ -303,16 +373,29 @@ print_restart_note() {
 }
 
 toggle_index() {
+  do_toggle_index "$@" || exit 1
+}
+
+set_index() {
+  do_set_index "$@" || exit 1
+}
+
+# Returns 0 on success, 1 on error. Errors go through fail() (stderr + ERR_MSG).
+# Sets WROTE=1 if the file was actually written.
+# If show_note is "yes", prints the restart hint on success.
+do_toggle_index() {
   local index="$1"
   local show_note="${2:-yes}"
   local record current next label
 
   if ! [[ "$index" == <-> ]]; then
-    die "Invalid choice: $index"
+    fail "Invalid choice: $index"
+    return 1
   fi
 
   if (( index < 1 || index > ${#REGISTRY[@]} )); then
-    die "Choice out of range: $index"
+    fail "Choice out of range: $index"
+    return 1
   fi
 
   record="${REGISTRY[$index]}"
@@ -327,11 +410,15 @@ toggle_index() {
       next=true
       ;;
     *)
-      die "Could not find enabled=true/false in [$TOOL_SECTION]. Nothing was changed."
+      fail "Could not find enabled=true/false in [$TOOL_SECTION]. Nothing was changed."
+      return 1
       ;;
   esac
 
-  write_enabled_value "$TOOL_SECTION" "$next" || die "Failed to update $CONFIG"
+  if ! write_enabled_value "$TOOL_SECTION" "$next"; then
+    fail "Failed to update $CONFIG"
+    return 1
+  fi
   WROTE=1
   label="$(status_label "$next")"
 
@@ -342,25 +429,32 @@ toggle_index() {
   fi
 }
 
-set_index() {
+# Returns 0 on success, 1 on error. Errors go through fail() (stderr + ERR_MSG).
+# Sets WROTE=1 if the file was actually written.
+# If show_note is "yes", prints the restart hint on success.
+# If the section is already in the desired state, succeeds silently.
+do_set_index() {
   local index="$1"
   local desired="$2"
   local show_note="${3:-yes}"
   local record current label
 
   if ! [[ "$index" == <-> ]]; then
-    die "Invalid choice: $index"
+    fail "Invalid choice: $index"
+    return 1
   fi
 
   if (( index < 1 || index > ${#REGISTRY[@]} )); then
-    die "Choice out of range: $index"
+    fail "Choice out of range: $index"
+    return 1
   fi
 
   case "$desired" in
     true|false)
       ;;
     *)
-      die "Invalid state: $desired (expected true or false)"
+      fail "Invalid state: $desired (expected true or false)"
+      return 1
       ;;
   esac
 
@@ -372,7 +466,8 @@ set_index() {
     true|false)
       ;;
     *)
-      die "Could not find enabled=true/false in [$TOOL_SECTION]. Nothing was changed."
+      fail "Could not find enabled=true/false in [$TOOL_SECTION]. Nothing was changed."
+      return 1
       ;;
   esac
 
@@ -380,7 +475,10 @@ set_index() {
     return 0
   fi
 
-  write_enabled_value "$TOOL_SECTION" "$desired" || die "Failed to update $CONFIG"
+  if ! write_enabled_value "$TOOL_SECTION" "$desired"; then
+    fail "Failed to update $CONFIG"
+    return 1
+  fi
   WROTE=1
   label="$(status_label "$desired")"
 
@@ -392,6 +490,7 @@ set_index() {
 }
 
 show_menu() {
+  local interactive="${1:-}"
   local index=1
   local record current label
 
@@ -411,29 +510,37 @@ show_menu() {
     index=$((index + 1))
   done
 
-  print -- ""
-  print -- "Type a number to toggle, 'a' to refresh the list, or press Enter to quit."
+  if [[ "$interactive" == "interactive" ]]; then
+    print -- ""
+    print -- "Type a number to toggle, 'a' to refresh, 'q' to quit, or press Enter to quit."
+  fi
 }
 
 text_menu() {
   local choice
 
   while true; do
-    show_menu
+    show_menu interactive
     printf '> '
-    read -r choice
+    read -r choice || return 0  # EOF (Ctrl-D) → quit
 
     case "$choice" in
-      '')
+      ''|q|Q|quit|exit)
         return 0
         ;;
       a|A)
         load_registry
         continue
         ;;
+      <->)
+        do_toggle_index "$choice" || sleep 1
+        load_registry
+        continue
+        ;;
       *)
-        toggle_index "$choice"
-        return 0
+        print -u2 -- "Invalid choice: $choice"
+        sleep 1
+        continue
         ;;
     esac
   done
@@ -456,6 +563,26 @@ fzf_rows() {
   done
 }
 
+# Reply for the fzf transform bindings: refresh the list (and restore the
+# normal header) after a write; surface the error in the header otherwise.
+# Parentheses become brackets — a literal `)` would end the fzf action.
+transform_reply() {
+  local msg
+
+  if (( WROTE )); then
+    print -n -- "reload-sync(${SCRIPT_PATH:q} rows)+change-header($FZF_HEADER)"
+    return 0
+  fi
+
+  if [[ -n "$ERR_MSG" ]]; then
+    msg="${ERR_MSG//\(/[}"
+    msg="${msg//\)/]}"
+    print -n -- "change-header($msg)"
+  fi
+
+  return 0
+}
+
 fzf_menu() {
   local script rc
 
@@ -473,9 +600,9 @@ fzf_menu() {
     --border-label=' Codex tools ' \
     --padding=0,1 \
     --tabstop=1 \
-    --info=inline-right \
+    --no-info \
     --prompt='❯ ' \
-    --header='→ enable • ← disable • space toggle • enter/esc quit' \
+    --header="$FZF_HEADER" \
     --color='header:dim,border:dim,label:bold' \
     --delimiter=$'\t' \
     --with-nth='2,3,4' \
@@ -524,14 +651,33 @@ print_help() {
   print -- "  cdxt toggle N     toggle item N"
   print -- "  cdxt set N STATE  force item N to a state (true or false)"
   print -- "  cdxt help         show this help"
+  print -- "  cdxt version      show cdxt version"
   print -- ""
   print -- "Environment variables:"
-  print -- "  CODEX_CONFIG               path to config.toml (default: ~/.codex/config.toml)"
-  print -- "  CODEX_CONFIG_BACKUP_DIR    backup directory (default: ~/.codex/config.toml.backups)"
+  print -- "  CODEX_CONFIG               path to config.toml (default: \$CODEX_HOME/config.toml or ~/.codex/config.toml)"
+  print -- "  CODEX_HOME                 Codex directory (default: ~/.codex); CODEX_CONFIG and CODEX_CONFIG_BACKUP_DIR default to \$CODEX_HOME/"
+  print -- "  CODEX_CONFIG_BACKUP_DIR    backup directory (default: \$CODEX_HOME/config.toml.backups)"
   print -- "  CODEX_CONFIG_BACKUP_KEEP   number of backups to keep (default: 20)"
 }
 
+print_version() {
+  print -- "cdxt $VERSION"
+}
+
 main() {
+  # Help and version are always available, even when the config is missing
+  # or has no sections — so `cdxt help` works as an installation check.
+  case "${1:-menu}" in
+    help|-h|--help)
+      print_help
+      return 0
+      ;;
+    version|--version|-v)
+      print_version
+      return 0
+      ;;
+  esac
+
   if ! [[ "$BACKUP_KEEP" == <-> ]]; then
     die "CODEX_CONFIG_BACKUP_KEEP must be a non-negative integer (got: $BACKUP_KEEP)"
   fi
@@ -564,10 +710,10 @@ main() {
       ;;
     transform-toggle)
       [[ $# -ge 2 ]] || die "Missing item number. Example: cdxt transform-toggle 6"
-      toggle_index "$2" no >/dev/null
-      if (( WROTE )); then
-        print -n -- "reload-sync(${SCRIPT_PATH:q} rows)"
-      fi
+      WROTE=0
+      ERR_MSG=""
+      do_toggle_index "$2" no >/dev/null 2>&1
+      transform_reply
       ;;
     set)
       [[ $# -ge 3 ]] || die "Missing item number and state. Example: cdxt set 6 true"
@@ -575,13 +721,10 @@ main() {
       ;;
     transform-set)
       [[ $# -ge 3 ]] || die "Missing item number and state. Example: cdxt transform-set 6 true"
-      set_index "$2" "$3" no >/dev/null
-      if (( WROTE )); then
-        print -n -- "reload-sync(${SCRIPT_PATH:q} rows)"
-      fi
-      ;;
-    help|-h|--help)
-      print_help
+      WROTE=0
+      ERR_MSG=""
+      do_set_index "$2" "$3" no >/dev/null 2>&1
+      transform_reply
       ;;
     *)
       die "Unknown command: $1 (run 'cdxt help' for usage)"

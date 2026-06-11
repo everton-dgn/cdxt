@@ -30,7 +30,7 @@ Instead of editing TOML by hand every time you want to enable or disable an MCP 
 | `zsh` | Yes | Pre-installed on macOS. On Linux: `sudo apt install zsh` (or `dnf`/`pacman`). Your login shell does **not** need to be zsh — the script runs under zsh via its shebang. |
 | `awk` | Yes | Any POSIX awk works (BSD awk, gawk, mawk). Already present on macOS and every mainstream Linux distro. |
 | `fzf` ≥ 0.71 | No | Enables the visual menu. Older fzf versions are detected and the script falls back to the text menu automatically. See [installing a recent fzf](#installing-a-recent-fzf). |
-| `trash` | No | Used only to prune old backups. Without it, backups simply accumulate (nothing breaks). macOS: `brew install trash`. |
+| `trash` | No | Used to prune old backups and to clean up orphan temp files from failed writes. Without it, both simply accumulate (nothing breaks). macOS: `brew install trash`. |
 
 ## Installation
 
@@ -100,6 +100,7 @@ cdxt list         # print the numbered list with ON/OFF status
 cdxt toggle 6     # toggle item 6
 cdxt set 6 true   # force item 6 to a specific state (true or false)
 cdxt help         # usage and environment variables
+cdxt version      # print cdxt version
 ```
 
 Keys in the fzf menu:
@@ -120,6 +121,7 @@ All settings are environment variables — there is no config file for the tool 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CODEX_CONFIG` | `~/.codex/config.toml` | Path to the Codex config file to edit |
+| `CODEX_HOME` | `~/.codex` | Codex directory. `CODEX_CONFIG` and `CODEX_CONFIG_BACKUP_DIR` default to `$CODEX_HOME/...` |
 | `CODEX_CONFIG_BACKUP_DIR` | `~/.codex/config.toml.backups` | Where backups are stored |
 | `CODEX_CONFIG_BACKUP_KEEP` | `20` | How many backups to keep (pruning requires the `trash` command) |
 
