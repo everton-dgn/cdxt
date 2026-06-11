@@ -4,11 +4,11 @@ An interactive on/off switch for MCP servers and plugins in the [Codex CLI](http
 
 Instead of editing TOML by hand every time you want to enable or disable an MCP server or a plugin, run `cdxt`, pick the item, and it flips the `enabled` flag for you — with an automatic backup of the config before every change.
 
-![cdxt interactive menu showing MCP servers and plugins with ON/OFF status](assets/cdxt-menu.webp)
+<img width="2000" height="1367" alt="image" src="https://github.com/user-attachments/assets/18ece3a3-fe05-4cd3-b6c2-d487919e5e7d" />
 
 ## Demo
 
-▶ [Watch a 30-second demo](assets/cdxt-demo.mp4) — GitHub opens the video with an inline player.
+https://github.com/user-attachments/assets/e39b0d8a-95ab-4631-9fab-d54a0bd9465e
 
 ## Features
 
