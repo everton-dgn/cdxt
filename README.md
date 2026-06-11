@@ -4,16 +4,11 @@ An interactive on/off switch for MCP servers and plugins in the [Codex CLI](http
 
 Instead of editing TOML by hand every time you want to enable or disable an MCP server or a plugin, run `cdxt`, pick the item, and it flips the `enabled` flag for you — with an automatic backup of the config before every change.
 
-```text
-╭─ Codex tools ─────────────────────────────╮
-│ ❯                                         │
-│ → enable • ← disable • space toggle       │
-│  ● ON  mcp     Context7 MCP               │
-│  ● ON  mcp     Firecrawl MCP              │
-│  ○ OFF mcp     GitHub MCP                 │
-│  ● ON  plugin  CodeRabbit plugin          │
-╰───────────────────────────────────────────╯
-```
+![cdxt interactive menu showing MCP servers and plugins with ON/OFF status](assets/cdxt-menu.webp)
+
+## Demo
+
+▶ [Watch a 30-second demo](assets/cdxt-demo.mp4) — GitHub opens the video with an inline player.
 
 ## Features
 
