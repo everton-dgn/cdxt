@@ -15,9 +15,9 @@ SCRIPT_PATH="${0:A}"
 
 # fzf 0.71+ is required for --id-nth (cursor tracking across reloads).
 FZF_MIN_VERSION="0.71"
-FZF_HEADER='→ enable • ← disable • space toggle • enter/esc quit'
+FZF_FOOTER='→ enable   •   ← disable   •   space toggle   •   enter/esc quit   •   cdxt help'
 
-VERSION="0.1.0"
+VERSION="1.0.0"
 
 typeset -a REGISTRY
 typeset -A ENABLED_MAP
@@ -68,36 +68,10 @@ load_registry() {
   local records
 
   records="$(awk '
-    function word_title(word) {
-      if (word == "github") return "GitHub"
-      if (word == "coderabbit") return "CodeRabbit"
-      if (word == "devtools") return "DevTools"
-      if (word == "repl") return "REPL"
-      if (word == "mcp") return "MCP"
-
-      return toupper(substr(word, 1, 1)) tolower(substr(word, 2))
-    }
-
-    function pretty_name(value, kind, base, count, idx, parts, output) {
-      base = value
-      sub(/@.*/, "", base)
-      gsub(/[-_]/, " ", base)
-
-      count = split(base, parts, " ")
-      output = ""
-
-      for (idx = 1; idx <= count; idx++) {
-        if (parts[idx] == "") continue
-        output = output (output == "" ? "" : " ") word_title(parts[idx])
-      }
-
-      return output (kind == "mcp" ? " MCP" : " plugin")
-    }
-
     function emit() {
       if (section != "") {
         key = label "-" kind
-        print key "|" kind "|" section "|" pretty_name(label, kind)
+        print key "|" kind "|" section "|" label
       }
     }
 
@@ -513,6 +487,10 @@ show_menu() {
   if [[ "$interactive" == "interactive" ]]; then
     print -- ""
     print -- "Type a number to toggle, 'a' to refresh, 'q' to quit, or press Enter to quit."
+    print -- "Run 'cdxt help' for all commands."
+  else
+    print -- ""
+    print -- "Run 'cdxt help' for all commands."
   fi
 }
 
@@ -564,20 +542,20 @@ fzf_rows() {
 }
 
 # Reply for the fzf transform bindings: refresh the list (and restore the
-# normal header) after a write; surface the error in the header otherwise.
+# normal footer) after a write; surface the error in the footer otherwise.
 # Parentheses become brackets — a literal `)` would end the fzf action.
 transform_reply() {
   local msg
 
   if (( WROTE )); then
-    print -n -- "reload-sync(${SCRIPT_PATH:q} rows)+change-header($FZF_HEADER)"
+    print -n -- "reload-sync(${SCRIPT_PATH:q} rows)+change-footer($FZF_FOOTER)"
     return 0
   fi
 
   if [[ -n "$ERR_MSG" ]]; then
     msg="${ERR_MSG//\(/[}"
     msg="${msg//\)/]}"
-    print -n -- "change-header($msg)"
+    print -n -- "change-footer($msg)"
   fi
 
   return 0
@@ -593,17 +571,22 @@ fzf_menu() {
     --no-sort \
     --track \
     --id-nth=1 \
+    --gap=1 \
+    --gap-line='' \
+    --scrollbar='┃' \
     --layout=reverse \
     --height='~80%' \
     --style=full:rounded \
     --border=rounded \
     --border-label=' Codex tools ' \
+    --border-label-pos=3 \
     --padding=0,1 \
     --tabstop=1 \
-    --no-info \
+    --info=inline-right \
     --prompt='❯ ' \
-    --header="$FZF_HEADER" \
-    --color='header:dim,border:dim,label:bold' \
+    --pointer='' \
+    --footer="$FZF_FOOTER" \
+    --color='hl:#f1fa8c,hl+:#f1fa8c,bg+:#343746,info:#6272a4,footer:#6272a4,scrollbar:#6272a4,border:dim,label:#f8f8f2:bold' \
     --delimiter=$'\t' \
     --with-nth='2,3,4' \
     --bind="space:transform($script transform-toggle {1})" \
@@ -634,6 +617,8 @@ fzf_supported() {
 }
 
 interactive_menu() {
+  [[ -t 1 ]] && clear
+
   if fzf_supported && [[ -t 0 && -t 1 ]]; then
     fzf_menu
     return
