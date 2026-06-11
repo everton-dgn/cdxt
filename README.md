@@ -38,6 +38,8 @@ cp cdxt/cdxt ~/.codex/scripts/cdxt
 chmod +x ~/.codex/scripts/cdxt
 ```
 
+Prefer updating with `git pull` instead of re-copying? Skip the `cp`/`chmod` lines and use Option C below.
+
 ### 2. Make it callable as `cdxt`
 
 Pick **one** of the options below.
@@ -65,13 +67,20 @@ ln -s ~/.codex/scripts/cdxt ~/.local/bin/cdxt
 
 Make sure `~/.local/bin` is on your PATH (`echo $PATH | tr ':' '\n' | grep .local`). If it is not, add `export PATH="$HOME/.local/bin:$PATH"` to your rc file.
 
+**Option C — run straight from the clone.** No copy involved: point the alias at the script inside the cloned repo, and `git pull` updates the command in place:
+
+```bash
+echo 'alias cdxt="$HOME/cdxt/cdxt"' >> ~/.zshrc   # adjust the path to where you cloned it
+source ~/.zshrc
+```
+
 ### 3. Verify
 
 ```bash
 cdxt help
 ```
 
-If you get `command not found`, open a new terminal (rc files are only read by new shells) and check [Troubleshooting](docs/TROUBLESHOOTING.md#command-not-found-cdxt).
+If you get `command not found`, open a new terminal (rc files are only read by new shells) and check [Troubleshooting](TROUBLESHOOTING.md#command-not-found-cdxt).
 
 ### Installing a recent fzf
 
@@ -122,7 +131,7 @@ All settings are environment variables — there is no config file for the tool 
 
 ## How it works
 
-1. The script scans `config.toml` for `[mcp_servers.<name>]` and `[plugins."<name>"]` sections. Headers must be on a line of their own with no inline comment — exactly the format Codex itself writes.
+1. The script scans `config.toml` for `[mcp_servers.<name>]` and `[plugins."<name>"]` sections. Headers must be on a line of their own with no inline comment — exactly the format Codex itself writes. Item names are displayed exactly as they appear in the config — the raw section key, with no reformatting.
 2. For each section it reads the `enabled` key. A section without an `enabled` key counts as enabled (Codex's default).
 3. When you toggle an item, the script first copies the config to the backup directory, then rewrites the file with `awk`, changing only the `enabled` line of that one section (or inserting it if missing). An inline comment on that line is preserved.
 
@@ -169,11 +178,11 @@ Then follow the normal [Installation](#installation) steps inside WSL.
   echo 'export CODEX_CONFIG="/mnt/c/Users/<you>/.codex/config.toml"' >> ~/.bashrc
   ```
 
-  ⚠️ If the Windows-side file uses CRLF line endings, the parser will not match its sections. See [Troubleshooting](docs/TROUBLESHOOTING.md#windows--wsl-issues) for how to detect and fix that.
+  ⚠️ If the Windows-side file uses CRLF line endings, the parser will not match its sections. See [Troubleshooting](TROUBLESHOOTING.md#windows--wsl-issues) for how to detect and fix that.
 
 ## Troubleshooting
 
-See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common problems and fixes: `command not found`, text menu showing instead of the fzf UI, config not found, WSL/CRLF issues, restoring backups, and more.
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common problems and fixes: `command not found`, text menu showing instead of the fzf UI, config not found, WSL/CRLF issues, restoring backups, and more.
 
 ## License
 

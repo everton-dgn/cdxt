@@ -8,7 +8,7 @@ The shell cannot find the command. Check, in order:
 
 1. **Did you open a new terminal?** Aliases added to `~/.zshrc` / `~/.bashrc` only take effect in new shells (or after `source ~/.zshrc`).
 2. **Is the alias in the right rc file?** Run `echo $SHELL`. If it ends in `zsh`, the alias belongs in `~/.zshrc`; if it ends in `bash`, in `~/.bashrc`. A common mistake is adding the alias to `~/.zshrc` while actually using bash.
-3. **Does the target exist and is it executable?**
+3. **Does the target exist and is it executable?** Check the path your alias (or symlink) points to — `~/.codex/scripts/cdxt` in the default setup, or the script inside the clone if you run it from there (Option C):
 
    ```bash
    ls -l ~/.codex/scripts/cdxt
