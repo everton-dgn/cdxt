@@ -1,0 +1,592 @@
+#!/usr/bin/env zsh
+# cdxt — interactive on/off toggle for MCP servers and plugins in the
+# Codex CLI config (~/.codex/config.toml).
+# https://github.com/everton-dgn/cdxt
+set -u
+
+CONFIG="${CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
+BACKUP_DIR="${CODEX_CONFIG_BACKUP_DIR:-${CODEX_HOME:-$HOME/.codex}/config.toml.backups}"
+BACKUP_KEEP="${CODEX_CONFIG_BACKUP_KEEP:-20}"
+SCRIPT_PATH="${0:A}"
+
+# fzf 0.71+ is required for --id-nth (cursor tracking across reloads).
+FZF_MIN_VERSION="0.71"
+
+typeset -a REGISTRY
+typeset -A ENABLED_MAP
+typeset -i WROTE=0
+
+die() {
+  print -u2 -- "$1"
+  exit 1
+}
+
+discard_file() {
+  if command -v trash >/dev/null 2>&1; then
+    trash "$1" 2>/dev/null
+  fi
+}
+
+prune_backups() {
+  local -a backups
+
+  backups=("$BACKUP_DIR"/config.toml.*(N.om))
+
+  (( ${#backups[@]} > BACKUP_KEEP )) || return 0
+
+  command -v trash >/dev/null 2>&1 || return 0
+
+  trash "${backups[@]:$BACKUP_KEEP}" 2>/dev/null
+}
+
+load_registry() {
+  local records
+
+  records="$(awk '
+    function word_title(word) {
+      if (word == "github") return "GitHub"
+      if (word == "coderabbit") return "CodeRabbit"
+      if (word == "devtools") return "DevTools"
+      if (word == "repl") return "REPL"
+      if (word == "mcp") return "MCP"
+
+      return toupper(substr(word, 1, 1)) tolower(substr(word, 2))
+    }
+
+    function pretty_name(value, kind, base, count, idx, parts, output) {
+      base = value
+      sub(/@.*/, "", base)
+      gsub(/[-_]/, " ", base)
+
+      count = split(base, parts, " ")
+      output = ""
+
+      for (idx = 1; idx <= count; idx++) {
+        if (parts[idx] == "") continue
+        output = output (output == "" ? "" : " ") word_title(parts[idx])
+      }
+
+      return output (kind == "mcp" ? " MCP" : " plugin")
+    }
+
+    function emit() {
+      if (section != "") {
+        key = label "-" kind
+        print key "|" kind "|" section "|" pretty_name(label, kind)
+      }
+    }
+
+    /^\[/ {
+      emit()
+
+      section = ""
+      kind = ""
+      label = ""
+
+      if ($0 ~ /^\[mcp_servers\.[^].]+\]$/) {
+        section = substr($0, 2, length($0) - 2)
+        label = section
+        sub(/^mcp_servers\./, "", label)
+        kind = "mcp"
+      } else if ($0 ~ /^\[plugins\."[^"]+"\]$/) {
+        section = substr($0, 2, length($0) - 2)
+        label = section
+        sub(/^plugins\."/,"", label)
+        sub(/"$/, "", label)
+        kind = "plugin"
+      }
+
+      next
+    }
+
+    END {
+      emit()
+    }
+  ' "$CONFIG")" || {
+    REGISTRY=()
+    return 1
+  }
+
+  if [[ -z "$records" ]]; then
+    REGISTRY=()
+    return 1
+  fi
+
+  REGISTRY=("${(@f)records}")
+}
+
+parse_record() {
+  local record="$1"
+  local IFS='|'
+  read -r TOOL_KEY TOOL_KIND TOOL_SECTION TOOL_LABEL <<< "$record"
+}
+
+enabled_value() {
+  local section="$1"
+
+  awk -v target="[$section]" '
+    $0 == target {
+      in_target = 1
+      found_section = 1
+      next
+    }
+
+    in_target && $0 ~ /^\[/ {
+      in_target = 0
+      print "true"
+      exit
+    }
+
+    in_target && $0 ~ /^[[:space:]]*enabled[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=/, "", value)
+      sub(/[[:space:]]*#.*$/, "", value)
+      gsub(/[[:space:]]/, "", value)
+      in_target = 0
+      print value
+      exit
+    }
+
+    END {
+      if (found_section && in_target) {
+        print "true"
+      }
+    }
+  ' "$CONFIG"
+}
+
+load_enabled_map() {
+  local section value
+
+  ENABLED_MAP=()
+
+  while IFS='|' read -r section value; do
+    ENABLED_MAP[$section]="$value"
+  done < <(awk '
+    function flush() {
+      if (section != "") {
+        print section "|" value
+      }
+    }
+
+    /^\[[^]]+\]$/ {
+      flush()
+      section = substr($0, 2, length($0) - 2)
+      value = "true"
+      next
+    }
+
+    section != "" && $0 ~ /^[[:space:]]*enabled[[:space:]]*=/ {
+      v = $0
+      sub(/^[^=]*=/, "", v)
+      sub(/[[:space:]]*#.*$/, "", v)
+      gsub(/[[:space:]]/, "", v)
+      value = v
+    }
+
+    END {
+      flush()
+    }
+  ' "$CONFIG")
+}
+
+write_enabled_value() {
+  local section="$1"
+  local value="$2"
+  local timestamp backup tmp
+
+  mkdir -p "$BACKUP_DIR" || return 1
+
+  timestamp="$(date +%Y%m%d-%H%M%S)-$$-$RANDOM"
+  backup="$BACKUP_DIR/config.toml.$timestamp"
+  tmp="$BACKUP_DIR/.tmp.config.toml.$timestamp"
+
+  cp "$CONFIG" "$backup" || return 1
+  cp -p "$CONFIG" "$tmp" || return 1
+
+  awk -v target="[$section]" -v desired="$value" '
+    $0 == target {
+      in_target = 1
+      inserted = 0
+      print
+      next
+    }
+
+    in_target && $0 ~ /^\[/ {
+      if (inserted == 0) {
+        print "enabled = " desired
+        inserted = 1
+      }
+      in_target = 0
+    }
+
+    in_target && $0 ~ /^[[:space:]]*enabled[[:space:]]*=/ {
+      suffix = ""
+      if (match($0, /#/)) {
+        suffix = " " substr($0, RSTART)
+      }
+      print "enabled = " desired suffix
+      inserted = 1
+      next
+    }
+
+    {
+      print
+    }
+
+    END {
+      if (in_target && inserted == 0) {
+        print "enabled = " desired
+      }
+    }
+  ' "$CONFIG" > "$tmp" || {
+    discard_file "$tmp"
+    return 1
+  }
+
+  mv "$tmp" "$CONFIG" || {
+    discard_file "$tmp"
+    return 1
+  }
+
+  prune_backups
+
+  print -- "Backup: $backup"
+}
+
+status_label() {
+  case "$1" in
+    true)
+      print -- "ON"
+      ;;
+    false)
+      print -- "OFF"
+      ;;
+    *)
+      print -- "???"
+      ;;
+  esac
+}
+
+status_cell() {
+  case "$1" in
+    true)
+      REPLY=$' \033[1;32m● ON \033[0m'
+      ;;
+    false)
+      REPLY=$' \033[2m○ OFF\033[0m'
+      ;;
+    *)
+      REPLY=$' \033[33m? ???\033[0m'
+      ;;
+  esac
+}
+
+kind_cell() {
+  case "$1" in
+    mcp)
+      REPLY=$'\033[36mmcp   \033[0m'
+      ;;
+    plugin)
+      REPLY=$'\033[35mplugin\033[0m'
+      ;;
+    *)
+      REPLY="$1"
+      ;;
+  esac
+}
+
+print_restart_note() {
+  print -- ""
+  print -- "Restart Codex or open a new session to reload the tool list."
+  print -- "In the current session the config file changes, but the model's tools are not reloaded dynamically."
+}
+
+toggle_index() {
+  local index="$1"
+  local show_note="${2:-yes}"
+  local record current next label
+
+  if ! [[ "$index" == <-> ]]; then
+    die "Invalid choice: $index"
+  fi
+
+  if (( index < 1 || index > ${#REGISTRY[@]} )); then
+    die "Choice out of range: $index"
+  fi
+
+  record="${REGISTRY[$index]}"
+  parse_record "$record"
+  current="$(enabled_value "$TOOL_SECTION")"
+
+  case "$current" in
+    true)
+      next=false
+      ;;
+    false)
+      next=true
+      ;;
+    *)
+      die "Could not find enabled=true/false in [$TOOL_SECTION]. Nothing was changed."
+      ;;
+  esac
+
+  write_enabled_value "$TOOL_SECTION" "$next" || die "Failed to update $CONFIG"
+  WROTE=1
+  label="$(status_label "$next")"
+
+  print -- "$TOOL_LABEL is now $label."
+
+  if [[ "$show_note" == "yes" ]]; then
+    print_restart_note
+  fi
+}
+
+set_index() {
+  local index="$1"
+  local desired="$2"
+  local show_note="${3:-yes}"
+  local record current label
+
+  if ! [[ "$index" == <-> ]]; then
+    die "Invalid choice: $index"
+  fi
+
+  if (( index < 1 || index > ${#REGISTRY[@]} )); then
+    die "Choice out of range: $index"
+  fi
+
+  case "$desired" in
+    true|false)
+      ;;
+    *)
+      die "Invalid state: $desired (expected true or false)"
+      ;;
+  esac
+
+  record="${REGISTRY[$index]}"
+  parse_record "$record"
+  current="$(enabled_value "$TOOL_SECTION")"
+
+  case "$current" in
+    true|false)
+      ;;
+    *)
+      die "Could not find enabled=true/false in [$TOOL_SECTION]. Nothing was changed."
+      ;;
+  esac
+
+  if [[ "$current" == "$desired" ]]; then
+    return 0
+  fi
+
+  write_enabled_value "$TOOL_SECTION" "$desired" || die "Failed to update $CONFIG"
+  WROTE=1
+  label="$(status_label "$desired")"
+
+  print -- "$TOOL_LABEL is now $label."
+
+  if [[ "$show_note" == "yes" ]]; then
+    print_restart_note
+  fi
+}
+
+show_menu() {
+  local index=1
+  local record current label
+
+  load_enabled_map
+
+  print -- ""
+  print -- "Codex tools toggle"
+  print -- "Config: $CONFIG"
+  print -- "MCP servers and plugins found in the config."
+  print -- ""
+
+  for record in "${REGISTRY[@]}"; do
+    parse_record "$record"
+    current="${ENABLED_MAP[$TOOL_SECTION]:-}"
+    label="$(status_label "$current")"
+    printf '%2d) [%-3s] %-7s %s\n' "$index" "$label" "$TOOL_KIND" "$TOOL_LABEL"
+    index=$((index + 1))
+  done
+
+  print -- ""
+  print -- "Type a number to toggle, 'a' to refresh the list, or press Enter to quit."
+}
+
+text_menu() {
+  local choice
+
+  while true; do
+    show_menu
+    printf '> '
+    read -r choice
+
+    case "$choice" in
+      '')
+        return 0
+        ;;
+      a|A)
+        load_registry
+        continue
+        ;;
+      *)
+        toggle_index "$choice"
+        return 0
+        ;;
+    esac
+  done
+}
+
+fzf_rows() {
+  local index=1
+  local record state kind
+
+  load_enabled_map
+
+  for record in "${REGISTRY[@]}"; do
+    parse_record "$record"
+    status_cell "${ENABLED_MAP[$TOOL_SECTION]:-}"
+    state="$REPLY"
+    kind_cell "$TOOL_KIND"
+    kind="$REPLY"
+    printf '%s\t%s\t%s\t%s\n' "$index" "$state" "$kind" "$TOOL_LABEL"
+    index=$((index + 1))
+  done
+}
+
+fzf_menu() {
+  local script rc
+
+  script="${SCRIPT_PATH:q}"
+
+  fzf_rows | fzf \
+    --ansi \
+    --no-sort \
+    --track \
+    --id-nth=1 \
+    --layout=reverse \
+    --height='~80%' \
+    --style=full:rounded \
+    --border=rounded \
+    --border-label=' Codex tools ' \
+    --padding=0,1 \
+    --tabstop=1 \
+    --info=inline-right \
+    --prompt='❯ ' \
+    --header='→ enable • ← disable • space toggle • enter/esc quit' \
+    --color='header:dim,border:dim,label:bold' \
+    --delimiter=$'\t' \
+    --with-nth='2,3,4' \
+    --bind="space:transform($script transform-toggle {1})" \
+    --bind="right:transform($script transform-set {1} true)" \
+    --bind="left:transform($script transform-set {1} false)" \
+    >/dev/null
+  rc=$?
+
+  if (( rc == 2 )); then
+    print -u2 -- "fzf exited with an error; falling back to the text menu."
+    text_menu
+    return
+  fi
+
+  print -- "If you toggled anything, restart Codex or open a new session to reload the tools."
+}
+
+fzf_supported() {
+  local version
+
+  command -v fzf >/dev/null 2>&1 || return 1
+
+  version="$(fzf --version 2>/dev/null)" || return 1
+  version="${version%% *}"
+
+  autoload -Uz is-at-least
+  is-at-least "$FZF_MIN_VERSION" "$version"
+}
+
+interactive_menu() {
+  if fzf_supported && [[ -t 0 && -t 1 ]]; then
+    fzf_menu
+    return
+  fi
+
+  text_menu
+}
+
+print_help() {
+  print -- "cdxt — toggle MCP servers and plugins in the Codex CLI config"
+  print -- ""
+  print -- "Usage:"
+  print -- "  cdxt              open the interactive menu (fzf UI if available, text menu otherwise)"
+  print -- "  cdxt list         print the numbered list with ON/OFF status"
+  print -- "  cdxt toggle N     toggle item N"
+  print -- "  cdxt set N STATE  force item N to a state (true or false)"
+  print -- "  cdxt help         show this help"
+  print -- ""
+  print -- "Environment variables:"
+  print -- "  CODEX_CONFIG               path to config.toml (default: ~/.codex/config.toml)"
+  print -- "  CODEX_CONFIG_BACKUP_DIR    backup directory (default: ~/.codex/config.toml.backups)"
+  print -- "  CODEX_CONFIG_BACKUP_KEEP   number of backups to keep (default: 20)"
+}
+
+main() {
+  if ! [[ "$BACKUP_KEEP" == <-> ]]; then
+    die "CODEX_CONFIG_BACKUP_KEEP must be a non-negative integer (got: $BACKUP_KEEP)"
+  fi
+
+  [[ -f "$CONFIG" ]] || die "Config not found: $CONFIG"
+
+  # Resolve symlinks so the rewrite replaces the real file, not the link
+  # (protects dotfile setups managed with stow/chezmoi).
+  CONFIG="${CONFIG:A}"
+
+  load_registry
+
+  if (( ${#REGISTRY[@]} == 0 )); then
+    die "No MCP servers or plugins found in $CONFIG"
+  fi
+
+  case "${1:-menu}" in
+    menu)
+      interactive_menu
+      ;;
+    list)
+      show_menu
+      ;;
+    rows)
+      fzf_rows
+      ;;
+    toggle)
+      [[ $# -ge 2 ]] || die "Missing item number. Example: cdxt toggle 6"
+      toggle_index "$2"
+      ;;
+    transform-toggle)
+      [[ $# -ge 2 ]] || die "Missing item number. Example: cdxt transform-toggle 6"
+      toggle_index "$2" no >/dev/null
+      if (( WROTE )); then
+        print -n -- "reload-sync(${SCRIPT_PATH:q} rows)"
+      fi
+      ;;
+    set)
+      [[ $# -ge 3 ]] || die "Missing item number and state. Example: cdxt set 6 true"
+      set_index "$2" "$3"
+      ;;
+    transform-set)
+      [[ $# -ge 3 ]] || die "Missing item number and state. Example: cdxt transform-set 6 true"
+      set_index "$2" "$3" no >/dev/null
+      if (( WROTE )); then
+        print -n -- "reload-sync(${SCRIPT_PATH:q} rows)"
+      fi
+      ;;
+    help|-h|--help)
+      print_help
+      ;;
+    *)
+      die "Unknown command: $1 (run 'cdxt help' for usage)"
+      ;;
+  esac
+}
+
+main "$@"
