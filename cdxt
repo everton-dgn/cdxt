@@ -562,19 +562,24 @@ transform_reply() {
 }
 
 fzf_menu() {
-  local script rc
+  local script rc gap=1
 
   script="${SCRIPT_PATH:q}"
+
+  # No --height on purpose: omitting it makes fzf run fullscreen and follow
+  # the real terminal size, so a maximized window is filled to the bottom
+  # without an empty band below the box, and the gaps fit. --height would
+  # instead open an inline window below the cursor; the script already
+  # clears the screen, so fullscreen is the right fit.
 
   fzf_rows | fzf \
     --ansi \
     --no-sort \
     --track \
     --id-nth=1 \
-    --gap=1 \
+    --gap="$gap" \
     --gap-line='' \
     --layout=reverse \
-    --height='~80%' \
     --style=full:rounded \
     --border=rounded \
     --border-label=' Codex tools ' \
