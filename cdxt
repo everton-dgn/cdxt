@@ -41,7 +41,7 @@ function trim(s)  { return rtrim(ltrim(s)) }
 
 # A single TOML key: bare, basic-quoted, or literal-quoted.
 function is_key(s) {
-  return s ~ /^([A-Za-z0-9_-]+|"[^"]*"|\047[^\047]*\047)$/
+  return s ~ /^([A-Za-z0-9_-]+|"([^"\\]|\\.)*"|\047[^\047]*\047)$/
 }
 
 function unquote(s) {
@@ -49,39 +49,70 @@ function unquote(s) {
   return s
 }
 
-function count_occ(s, needle,   n, p) {
+function quote_run(s, i,   c, n) {
+  c = substr(s, i, 1)
   n = 0
-  p = index(s, needle)
-  while (p > 0) {
-    n++
-    s = substr(s, p + length(needle))
-    p = index(s, needle)
-  }
+  while (substr(s, i + n, 1) == c) n++
   return n
 }
 
 # Multi-line string tracking, state in ML_IN / ML_DELIM. A """ or \047\047\047
 # body may contain anything, including lines that look like a table header
 # or an enabled key. A line that only opens a body is ordinary content and
-# returns 0; the lines after it return 1 until the closing delimiter. Known
-# limit: a single-line string holding a bare """ run would be mistaken for
-# an opening delimiter.
-function in_multiline(line) {
-  if (ML_IN) {
-    if (count_occ(line, ML_DELIM) % 2 == 1) ML_IN = 0
+# returns 0; the lines after it return 1 until the closing delimiter. The
+# line is scanned so a delimiter inside a single-line string, after a #, or
+# escaped as \""" in a basic body is not taken for one. ML_CODE receives the
+# parts of the line outside any body, such as the ] after a closing
+# delimiter, so the bracket count never reads body text.
+function in_multiline(line,   was_in, i, c, q, run, from) {
+  if (!ML_IN && index(line, "\"\"\"") == 0 && index(line, "\047\047\047") == 0) {
+    ML_CODE = line
+    return 0
+  }
+  if (ML_IN && index(line, ML_DELIM) == 0) {
+    ML_CODE = ""
     return 1
   }
-  if (count_occ(line, "\"\"\"") % 2 == 1) {
-    ML_IN = 1
-    ML_DELIM = "\"\"\""
-    return 0
+
+  was_in = ML_IN
+  ML_CODE = ""
+  from = 1
+  q = ""
+  for (i = 1; i <= length(line); i++) {
+    c = substr(line, i, 1)
+    if (ML_IN) {
+      if (c == "\\" && ML_DELIM == "\"\"\"") {
+        i++
+      } else if (c == substr(ML_DELIM, 1, 1)) {
+        # Up to two quotes of content may sit right before the delimiter.
+        run = quote_run(line, i)
+        if (run >= 3) {
+          ML_IN = 0
+          from = i + run
+        }
+        i += run - 1
+      }
+    } else if (q != "") {
+      if (q == "\"" && c == "\\") i++
+      else if (c == q) q = ""
+    } else if (c == "#") {
+      break
+    } else if (c == "\"" || c == "\047") {
+      run = quote_run(line, i)
+      if (run >= 3) {
+        ML_CODE = ML_CODE substr(line, from, i - from)
+        ML_IN = 1
+        ML_DELIM = c c c
+        i += 2
+      } else if (run == 2) {
+        i++
+      } else {
+        q = c
+      }
+    }
   }
-  if (count_occ(line, "\047\047\047") % 2 == 1) {
-    ML_IN = 1
-    ML_DELIM = "\047\047\047"
-    return 0
-  }
-  return 0
+  if (!ML_IN) ML_CODE = ML_CODE substr(line, from)
+  return was_in
 }
 
 # Running bracket depth of open multi-line arrays, state in ARR_DEPTH.
@@ -95,7 +126,9 @@ function array_depth_update(line,   i, c, q, d) {
   for (i = 1; i <= length(line); i++) {
     c = substr(line, i, 1)
     if (q != "") {
-      if (c == q) q = ""
+      # A basic string escapes its quote as \" ; a literal one has no escapes.
+      if (q == "\"" && c == "\\") i++
+      else if (c == q) q = ""
     } else if (c == "\"" || c == "\047") {
       q = c
     } else if (c == "#") {
@@ -116,22 +149,22 @@ function array_depth_update(line,   i, c, q, d) {
 # anything else: it advances the lexical state and reports whether the
 # line is the body of a multi-line string or of a multi-line array, both
 # of which can hold text that looks like TOML structure but is not.
-function skip_line(line,   inside_array) {
-  if (in_multiline(line)) return 1
-
+function skip_line(line,   is_body, inside_array) {
+  is_body = in_multiline(line)
   inside_array = (ARR_DEPTH > 0)
-  array_depth_update(line)
-  return inside_array
+  array_depth_update(ML_CODE)
+  return is_body || inside_array
 }
 
-# Everything before the first # that sits outside quotes. Escapes inside
-# basic strings are not decoded: a key holding \" is out of scope here.
+# Everything before the first # that sits outside quotes. An escaped \"
+# inside a basic string is skipped over, not decoded.
 function strip_comment(line,   i, c, q) {
   q = ""
   for (i = 1; i <= length(line); i++) {
     c = substr(line, i, 1)
     if (q != "") {
-      if (c == q) q = ""
+      if (q == "\"" && c == "\\") i++
+      else if (c == q) q = ""
     } else if (c == "\"" || c == "\047") {
       q = c
     } else if (c == "#") {
@@ -142,7 +175,8 @@ function strip_comment(line,   i, c, q) {
 }
 
 # Splits a dotted key into parts[], leaving dots inside quotes alone, and
-# trimming the blanks TOML allows around each dot. Returns the part count,
+# trimming the blanks TOML allows around each dot. An escape such as \"
+# inside a basic-quoted part is kept as written. Returns the part count,
 # or 0 when any part is not a well-formed key.
 function split_path(body, parts,   i, c, q, cur, n) {
   n = 0
@@ -152,7 +186,12 @@ function split_path(body, parts,   i, c, q, cur, n) {
     c = substr(body, i, 1)
     if (q != "") {
       cur = cur c
-      if (c == q) q = ""
+      if (q == "\"" && c == "\\") {
+        i++
+        cur = cur substr(body, i, 1)
+      } else if (c == q) {
+        q = ""
+      }
     } else if (c == "\"" || c == "\047") {
       q = c
       cur = cur c
@@ -212,14 +251,56 @@ function child_of(path, prefix,   rest) {
   return unquote(rest)
 }
 
+# Number for a run of hex digits, or -1 when one is not a hex digit.
+function hex_value(s,   i, d, n) {
+  n = 0
+  for (i = 1; i <= length(s); i++) {
+    d = index("0123456789abcdef", tolower(substr(s, i, 1)))
+    if (d == 0) return -1
+    n = n * 16 + d - 1
+  }
+  return n
+}
+
+# A basic-quoted key decoded only as far as comparing it with the ASCII
+# names cdxt looks up needs. Any escape that is not ASCII, or is a control
+# character, becomes \001, which none of those names holds. \xHH comes from
+# TOML 1.1, which Codex reads.
+function decode_key(s,   out, i, c, n, h, v) {
+  out = ""
+  for (i = 1; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    if (c != "\\") {
+      out = out c
+      continue
+    }
+    c = substr(s, ++i, 1)
+    n = (c == "u") ? 4 : ((c == "U") ? 8 : ((c == "x") ? 2 : 0))
+    if (n > 0) {
+      # A short run such as \u64 is invalid, so it must not decode.
+      h = substr(s, i + 1, n)
+      v = (length(h) == n) ? hex_value(h) : -1
+      i += n
+      out = out ((v >= 32 && v < 127) ? sprintf("%c", v) : "\001")
+    } else if (c == "\"" || c == "\\") {
+      out = out c
+    } else {
+      out = out "\001"
+    }
+  }
+  return out
+}
+
 # Key of an assignment line, unquoted; "" when the line is not one. TOML
-# reads "enabled" and enabled as the same key, so both have to match.
+# reads "enabled", enabled and "enabled" as the same key, so all of
+# them have to match.
 function key_of(line,   t, p, k) {
   t = ltrim(line)
   p = index(t, "=")
   if (p == 0) return ""
   k = rtrim(substr(t, 1, p - 1))
   if (!is_key(k)) return ""
+  if (substr(k, 1, 1) == "\"") return decode_key(unquote(k))
   return unquote(k)
 }
 
@@ -247,6 +328,8 @@ typeset -a REGISTRY
 typeset -A ENABLED_MAP
 typeset -i WROTE=0
 ERR_MSG=""
+FIX_COMMAND=""
+FIX_CWD=""
 
 die() {
   print -u2 -- "$1"
@@ -258,7 +341,7 @@ die() {
 # losing the WROTE flag set by do_toggle_index/do_set_index.
 fail() {
   ERR_MSG="$1"
-  print -u2 -- "$1"
+  print -ru2 -- "$1"
 }
 
 discard_file() {
@@ -295,7 +378,8 @@ load_registry() {
     function emit() {
       if (section != "") {
         key = label "-" kind
-        print key "|" kind "|" section "|" label
+        # A quoted key may hold | or a tab, but never a raw \037.
+        print key "\037" kind "\037" section "\037" label
       }
     }
 
@@ -348,7 +432,7 @@ load_registry() {
 
 parse_record() {
   local record="$1"
-  local IFS='|'
+  local IFS=$'\037'
   read -r TOOL_KEY TOOL_KIND TOOL_SECTION TOOL_LABEL <<< "$record"
 }
 
@@ -396,12 +480,12 @@ load_enabled_map() {
 
   ENABLED_MAP=()
 
-  while IFS='|' read -r section value; do
+  while IFS=$'\037' read -r section value; do
     ENABLED_MAP[$section]="$value"
   done < <(awk "$AWK_LIB"'
     function flush() {
       if (section != "") {
-        print section "|" value
+        print section "\037" value
       }
     }
 
@@ -461,9 +545,202 @@ section_has_enabled() {
   ' "$CONFIG"
 }
 
+# The url, command and cwd of a section, one "key|raw value" line each,
+# comment stripped and value still TOML-encoded.
+launch_keys() {
+  local section="$1"
+
+  CDXT_TARGET="$section" awk "$AWK_LIB"'
+    BEGIN { target = ENVIRON["CDXT_TARGET"] }
+
+    { if (skip_line($0)) next }
+
+    {
+      path = table_path($0)
+      if (path != "") {
+        if (in_target) exit
+
+        if (path == target && !is_array_table($0)) in_target = 1
+        next
+      }
+    }
+
+    in_target {
+      key = key_of($0)
+      if ((key == "url" || key == "command" || key == "cwd") && !(key in seen)) {
+        seen[key] = 1
+        print key "|" trim(strip_comment(substr($0, index($0, "=") + 1)))
+      }
+    }
+  ' "$CONFIG"
+}
+
+# Decodes a single-line TOML string into REPLY. Only the \\ and \" escapes
+# are decoded; any other escape, a multi-line string or a non-string value
+# returns 1, so a path is never judged by a spelling it was not written in.
+toml_string() {
+  local raw="$1" body out="" c
+  local -i i
+
+  case "$raw" in
+    \"\"\"*|\'\'\'*)
+      return 1
+      ;;
+    \'*\')
+      REPLY="${raw[2,-2]}"
+      [[ "$REPLY" != *\'* ]]
+      return
+      ;;
+    \"*\")
+      body="${raw[2,-2]}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  for (( i = 1; i <= ${#body}; i++ )); do
+    c="${body[i]}"
+    [[ "$c" == \" ]] && return 1
+    if [[ "$c" == \\ ]]; then
+      (( i++ ))
+      c="${body[i]}"
+      [[ "$c" == \\ || "$c" == \" ]] || return 1
+    fi
+    out+="$c"
+  done
+
+  REPLY="$out"
+}
+
+toml_quote() {
+  local s="${1//\\/\\\\}"
+  REPLY="\"${s//\"/\\\"}\""
+}
+
+# Runs before an MCP server is enabled. Codex resolves a relative command
+# against the directory each session starts in, so such a server starts
+# from one folder only. When exactly one copy of the target exists under
+# the config directory, FIX_COMMAND (and FIX_CWD for a relative cwd) point
+# at it; with none or several, the enable is refused. Bare names go through
+# Codex's PATH, which may differ from this shell's, and `~` expansion is
+# unverified: both pass untouched.
+prepare_mcp_enable() {
+  local key raw command rel root match base target cwd
+  local -A values
+  local -a bases
+
+  FIX_COMMAND=""
+  FIX_CWD=""
+  [[ "$TOOL_KIND" == mcp ]] || return 0
+
+  while IFS='|' read -r key raw; do
+    values[$key]="$raw"
+  done < <(launch_keys "$TOOL_SECTION")
+
+  (( ${+values[url]} )) && return 0
+  (( ${+values[command]} )) || return 0
+  if ! toml_string "${values[command]}"; then
+    fail "$TOOL_LABEL was not enabled: could not read its command, write it as a plain string: ${values[command]}. Nothing was changed."
+    return 1
+  fi
+  command="$REPLY"
+
+  [[ "$command" == */* && "$command" != \~* ]] || return 0
+
+  if [[ "$command" == /* ]]; then
+    [[ -f "$command" && -x "$command" ]] && return 0
+    fail "$TOOL_LABEL was not enabled: command not found or not executable: $command. Nothing was changed."
+    return 1
+  fi
+
+  rel="$command"
+  while [[ "$rel" == ./* ]]; do
+    rel="${rel#./}"
+  done
+
+  # A parent reference leaves the starting folder ambiguous.
+  if [[ "/$rel/" == */../* ]]; then
+    fail "$TOOL_LABEL was not enabled: its relative command climbs out of the folder Codex starts in, set an absolute path: $command. Nothing was changed."
+    return 1
+  fi
+
+  # Matches are not pruned: a copy nested inside another one still counts
+  # against uniqueness.
+  root="${CONFIG:h}"
+  bases=()
+  while IFS= read -r -d '' match; do
+    base="${match:h}"
+    [[ -f "$base/$rel" && -x "$base/$rel" ]] && bases+=("$base")
+  done < <(find "$root" -maxdepth 6 \
+    \( -name sessions -o -name archived_sessions -o -name .git -o -name node_modules \) -prune \
+    -o -name "${(b)rel%%/*}" -print0 2>/dev/null)
+
+  if (( ${#bases[@]} == 0 )); then
+    fail "$TOOL_LABEL was not enabled: its relative command depends on the folder Codex starts in, and no copy of it was found under $root: $command. Nothing was changed."
+    return 1
+  fi
+
+  if (( ${#bases[@]} > 1 )); then
+    fail "$TOOL_LABEL was not enabled: its relative command matches ${#bases[@]} copies under $root, set an absolute path: $command. Nothing was changed."
+    return 1
+  fi
+
+  base="${bases[1]}"
+  target="$base/$rel"
+
+  # A symlink could send the command anywhere on disk.
+  if [[ "${target:A}" != "$root"/* ]]; then
+    fail "$TOOL_LABEL was not enabled: its only copy resolves outside $root, set an absolute path: $command. Nothing was changed."
+    return 1
+  fi
+
+  # A relative cwd was written for the same starting folder as the command.
+  cwd=""
+  if (( ${+values[cwd]} )); then
+    if ! toml_string "${values[cwd]}"; then
+      fail "$TOOL_LABEL was not enabled: could not read its cwd, write it as a plain string: ${values[cwd]}. Nothing was changed."
+      return 1
+    fi
+    cwd="$REPLY"
+    if [[ "$cwd" == /* || "$cwd" == \~* ]]; then
+      cwd=""
+    else
+      cwd="${cwd#./}"
+      if [[ -z "$cwd" || "$cwd" == . ]]; then
+        cwd="$base"
+      else
+        cwd="$base/$cwd"
+      fi
+    fi
+  fi
+
+  # A raw control character would end the single-line TOML string.
+  if [[ "$target" == *[[:cntrl:]]* ]]; then
+    fail "$TOOL_LABEL was not enabled: the path of its only copy holds a control character, set an absolute path: $command. Nothing was changed."
+    return 1
+  fi
+
+  if [[ "$cwd" == *[[:cntrl:]]* ]]; then
+    fail "$TOOL_LABEL was not enabled: its cwd holds a control character, set an absolute cwd: ${values[cwd]}. Nothing was changed."
+    return 1
+  fi
+
+  toml_quote "$target"
+  FIX_COMMAND="$REPLY"
+  if [[ -n "$cwd" ]]; then
+    toml_quote "$cwd"
+    FIX_CWD="$REPLY"
+  fi
+
+  return 0
+}
+
 write_enabled_value() {
   local section="$1"
   local value="$2"
+  local command="${3:-}"
+  local cwd="${4:-}"
   local timestamp backup tmp has_enabled
 
   mkdir -p "$BACKUP_DIR" || return 1
@@ -478,13 +755,32 @@ write_enabled_value() {
   has_enabled=0
   section_has_enabled "$section" && has_enabled=1
 
-  CDXT_TARGET="$section" awk -v desired="$value" -v has_enabled="$has_enabled" "$AWK_LIB"'
+  # The rewritten values travel through ENVIRON: awk -v would decode the
+  # backslashes of a TOML-escaped path.
+  CDXT_TARGET="$section" CDXT_COMMAND="$command" CDXT_CWD="$cwd" \
+  awk -v desired="$value" -v has_enabled="$has_enabled" "$AWK_LIB"'
     function flush_blanks(   i) {
       for (i = 1; i <= nblank; i++) print blanks[i]
       nblank = 0
     }
 
-    BEGIN { target = ENVIRON["CDXT_TARGET"] }
+    # Keeps the line own spelling of the key -- indentation, blanks and
+    # quotes alike -- and whatever comment trailed the value.
+    function assign(line, value,   eq, head, rest, suffix) {
+      eq = index(line, "=")
+      head = substr(line, 1, eq)
+      rest = substr(line, eq + 1)
+      suffix = ltrim(substr(rest, length(strip_comment(rest)) + 1))
+      sub(/\r$/, "", suffix)
+      if (suffix != "") suffix = " " suffix
+      return head " " value suffix
+    }
+
+    BEGIN {
+      target = ENVIRON["CDXT_TARGET"]
+      if (ENVIRON["CDXT_COMMAND"] != "") replace["command"] = ENVIRON["CDXT_COMMAND"]
+      if (ENVIRON["CDXT_CWD"] != "") replace["cwd"] = ENVIRON["CDXT_CWD"]
+    }
 
     { if (skip_line($0)) { print; next } }
 
@@ -516,22 +812,21 @@ write_enabled_value() {
       }
     }
 
+    # Paths resolved by prepare_mcp_enable, first occurrence only.
+    in_target && (key_of($0) in replace) {
+      flush_blanks()
+      key = key_of($0)
+      print assign($0, replace[key]) cr
+      delete replace[key]
+      next
+    }
+
     # Only the first enabled key of the section is rewritten: a second one
     # would already be invalid TOML, and touching it would edit the file
     # further than asked.
     in_target && !inserted && is_enabled_line($0) {
       flush_blanks()
-
-      # Keep the line own spelling of the key -- indentation, blanks and a
-      # quoted "enabled" alike -- and whatever comment trailed the value.
-      eq = index($0, "=")
-      head = substr($0, 1, eq)
-      rest = substr($0, eq + 1)
-      suffix = ltrim(substr(rest, length(strip_comment(rest)) + 1))
-      sub(/\r$/, "", suffix)
-      if (suffix != "") suffix = " " suffix
-
-      print head " " desired suffix cr
+      print assign($0, desired) cr
       inserted = 1
       next
     }
@@ -629,6 +924,12 @@ kind_cell() {
   esac
 }
 
+print_path_fixes() {
+  [[ -n "$FIX_COMMAND" ]] && print -r -- "$TOOL_LABEL: command = $FIX_COMMAND"
+  [[ -n "$FIX_CWD" ]] && print -r -- "$TOOL_LABEL: cwd = $FIX_CWD"
+  return 0
+}
+
 print_restart_note() {
   print -- ""
   print -- "Restart Codex or open a new session to reload the tool list."
@@ -678,14 +979,21 @@ do_toggle_index() {
       ;;
   esac
 
-  if ! write_enabled_value "$TOOL_SECTION" "$next"; then
+  FIX_COMMAND=""
+  FIX_CWD=""
+  if [[ "$next" == true ]] && ! prepare_mcp_enable; then
+    return 1
+  fi
+
+  if ! write_enabled_value "$TOOL_SECTION" "$next" "$FIX_COMMAND" "$FIX_CWD"; then
     fail "Failed to update $CONFIG"
     return 1
   fi
   WROTE=1
   label="$(status_label "$next")"
 
-  print -- "$TOOL_LABEL is now $label."
+  print_path_fixes
+  print -r -- "$TOOL_LABEL is now $label."
 
   if [[ "$show_note" == "yes" ]]; then
     print_restart_note
@@ -738,14 +1046,21 @@ do_set_index() {
     return 0
   fi
 
-  if ! write_enabled_value "$TOOL_SECTION" "$desired"; then
+  FIX_COMMAND=""
+  FIX_CWD=""
+  if [[ "$desired" == true ]] && ! prepare_mcp_enable; then
+    return 1
+  fi
+
+  if ! write_enabled_value "$TOOL_SECTION" "$desired" "$FIX_COMMAND" "$FIX_CWD"; then
     fail "Failed to update $CONFIG"
     return 1
   fi
   WROTE=1
   label="$(status_label "$desired")"
 
-  print -- "$TOOL_LABEL is now $label."
+  print_path_fixes
+  print -r -- "$TOOL_LABEL is now $label."
 
   if [[ "$show_note" == "yes" ]]; then
     print_restart_note
@@ -841,10 +1156,13 @@ transform_reply() {
     return 0
   fi
 
+  # -r keeps print from decoding escapes such as \x29 back into a `)`
+  # taken from a config value.
   if [[ -n "$ERR_MSG" ]]; then
     msg="${ERR_MSG//\(/[}"
     msg="${msg//\)/]}"
-    print -n -- "change-footer($msg)"
+    msg="${msg//[[:cntrl:]]/ }"
+    print -rn -- "change-footer($msg)"
   fi
 
   return 0
@@ -881,7 +1199,7 @@ fzf_menu() {
     --footer="$FZF_FOOTER" \
     --color='hl:#f1fa8c,hl+:#f1fa8c,bg+:#343746,info:#6272a4,footer:#6272a4,scrollbar:#6272a4,border:dim,label:#f8f8f2:bold' \
     --delimiter=$'\t' \
-    --with-nth='2,3,4' \
+    --with-nth='2..' \
     --bind="space:transform($script transform-toggle {1})" \
     --bind="right:transform($script transform-set {1} true)" \
     --bind="left:transform($script transform-set {1} false)" \

@@ -109,24 +109,6 @@ If Codex runs on Windows itself (not inside WSL), its config is at `C:\Users\<yo
 CODEX_CONFIG="/mnt/c/Users/<you>/.codex/config.toml" cdxt
 ```
 
-### Sections are not detected on a Windows-side config (CRLF)
-
-The parser matches section headers as exact whole lines. If the file uses Windows line endings (CRLF), every line carries a trailing `\r` and nothing matches — you will see `No MCP servers or plugins found` even though the sections are there.
-
-Detect it:
-
-```bash
-file /mnt/c/Users/<you>/.codex/config.toml
-# "... with CRLF line terminators" -> that is the problem
-```
-
-Fix it by converting the file to LF (Codex on Windows reads LF files fine):
-
-```bash
-sudo apt install dos2unix
-dos2unix /mnt/c/Users/<you>/.codex/config.toml
-```
-
 ## `Failed to update ...`
 
 The script could not complete a write. The write path is: create the backup directory, copy the config into it, rewrite the config to a temporary file, then move the temporary file over the original. Your original config is only replaced by that final move — if the script dies earlier, the file is untouched (and a backup copy may already exist in the backup directory).
@@ -145,6 +127,20 @@ Check, in order:
 ## `Could not find enabled=true/false in [...]`
 
 Same root cause as the `???` status above, hit from the non-interactive path (`cdxt toggle N` / `cdxt set N STATE`): the section's current `enabled` value is not a bare boolean, so the script refuses to write. Fix the value manually once, and toggling will work from then on.
+
+## `<name> was not enabled: ...`
+
+Before enabling a local MCP server, the script checks the path in its `command` (not the server itself). Codex resolves a relative path against the folder each session starts in, so a server like `command = "./Some.app/bin/server"` only works from one directory and fails everywhere else with `No such file or directory (os error 2)`.
+
+- **`command not found or not executable`**: the absolute path does not exist or lacks the `x` bit. Fix the path, or reinstall the tool that provides it.
+- **`no copy of it was found under ...`**: the relative path was not found in the folder that holds the config, searching up to 6 levels deep and skipping `sessions`, `archived_sessions`, `.git` and `node_modules`. Replace it with the absolute path of the executable.
+- **`matches N copies under ...`**: the script will not guess which copy is right. Set the absolute path yourself.
+- **`climbs out of the folder Codex starts in`**: a path with a `..` component cannot be resolved reliably. Set the absolute path yourself.
+- **`resolves outside ...`**: the only copy found reaches a file outside that folder through a symlink. Set the absolute path yourself if you trust it.
+- **`holds a control character`**: the path of the only copy, or its `cwd`, contains a control character, tab included, which the script does not write. Rename the folder, or set the path yourself.
+- **`could not read its command`** / **`could not read its cwd`**: the value uses escapes other than `\\` and `\"`, a multi-line string, or is not a string. Write it as a plain string.
+
+When exactly one copy exists, no action is needed: the script rewrites `command` (and a relative `cwd`) to absolute paths and enables the server. The backup taken before the write lets you undo it.
 
 ## Something else?
 
