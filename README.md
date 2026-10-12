@@ -14,6 +14,7 @@ https://github.com/user-attachments/assets/e39b0d8a-95ab-4631-9fab-d54a0bd9465e
 
 - Lists the `[mcp_servers.*]` and `[plugins."*"]` sections found in your Codex config
 - Toggles the `enabled` flag in place, preserving the rest of the file untouched
+- Checks the command path of a local MCP server before enabling it (see [How it works](#how-it-works))
 - Automatic timestamped backup of `config.toml` before every write (keeps the last 20 by default)
 - Two interfaces: a fuzzy-searchable fzf UI, and a plain-text numbered menu as a fallback
 - Non-interactive subcommands (`list`, `toggle`, `set`) for scripting
@@ -131,9 +132,16 @@ All settings are environment variables — there is no config file for the tool 
 
 ## How it works
 
-1. The script scans `config.toml` for `[mcp_servers.<name>]` and `[plugins."<name>"]` sections. Headers must be on a line of their own with no inline comment — exactly the format Codex itself writes. Item names are displayed exactly as they appear in the config — the raw section key, with no reformatting.
+1. The script scans `config.toml` for `[mcp_servers.<name>]` and `[plugins."<name>"]` sections. A header may be indented and may end with a comment. Item names are displayed exactly as they appear in the config: the raw section key, with no reformatting.
 2. For each section it reads the `enabled` key. A section without an `enabled` key counts as enabled (Codex's default).
-3. When you toggle an item, the script first copies the config to the backup directory, then rewrites the file with `awk`, changing only the `enabled` line of that one section (or inserting it if missing). An inline comment on that line is preserved.
+3. When you toggle an item, the script first copies the config to the backup directory, then rewrites the file with `awk`, changing only the `enabled` line of that one section (or inserting it if missing). An inline comment on that line is preserved. Step 4 is the only case that also rewrites other keys.
+4. Enabling an MCP server first checks the path in its `command`, since Codex resolves a relative path against the folder each session starts in. The check covers the path only: it does not run the server, nor verify its dependencies or that `cwd` exists.
+   - An absolute path must point to an executable file, or the server stays off.
+   - A relative path such as `./Some.app/bin/server` is searched for in the folder that holds the config (after resolving symlinks, `~/.codex` by default), up to 6 levels deep for its first component, skipping `sessions`, `archived_sessions`, `.git` and `node_modules`. With exactly one executable match inside that folder, `command` is rewritten to its absolute path, and a relative `cwd` is joined to the same base folder as written (a `..` in it is kept). With no match, several matches, a match that resolves outside the folder through a symlink, a resulting path holding a control character (tab included), or a `..` component in the command path, the server stays off.
+   - A `command` the script cannot read (escapes other than `\\` and `\"`, multi-line strings, non-string values) keeps the server off. So does an unreadable `cwd` when the command is being rewritten; otherwise `cwd` is not checked.
+   - Servers with a `url`, bare command names without a `/` resolved through `PATH` (such as `npx`), and paths starting with `~` are enabled without checks.
+
+   When a server stays off, the reason is printed (in the fzf menu, it shows in the footer) and the file is not touched. Disabling is never checked.
 
 To restore a previous config:
 
@@ -178,11 +186,11 @@ Then follow the normal [Installation](#installation) steps inside WSL.
   echo 'export CODEX_CONFIG="/mnt/c/Users/<you>/.codex/config.toml"' >> ~/.bashrc
   ```
 
-  ⚠️ If the Windows-side file uses CRLF line endings, the parser will not match its sections. See [Troubleshooting](TROUBLESHOOTING.md#windows--wsl-issues) for how to detect and fix that.
+  A Windows-side file with CRLF line endings needs no conversion: the script reads it as is and keeps CRLF on the lines it rewrites or inserts.
 
 ## Troubleshooting
 
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common problems and fixes: `command not found`, text menu showing instead of the fzf UI, config not found, WSL/CRLF issues, restoring backups, and more.
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common problems and fixes: `command not found`, text menu showing instead of the fzf UI, config not found, WSL issues, restoring backups, and more.
 
 ## License
 
