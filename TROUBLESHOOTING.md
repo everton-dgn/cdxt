@@ -58,9 +58,8 @@ The script could not find the Codex config file. Possible causes:
 The config exists but contains no sections the script recognizes. It looks for exactly these two shapes:
 
 ```toml
-[mcp_servers.context7]
-command = "npx"
-args = ["-y", "@upstash/context7-mcp"]
+[mcp_servers.documentation]
+url = "https://mcp.example.com/mcp"
 
 [plugins."coderabbit@marketplace"]
 enabled = true
